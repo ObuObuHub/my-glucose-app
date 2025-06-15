@@ -8,14 +8,12 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
 import plotly.graph_objects as go
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
 import gspread
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
+from google.oauth2 import service_account
 from google_auth_oauthlib.flow import Flow
 import json
 import os
+import base64
 
 # Page configuration - this makes our app look good on phones
 st.set_page_config(
@@ -30,42 +28,123 @@ if 'authenticated' not in st.session_state:
     st.session_state.authenticated = False
     st.session_state.user_email = None
     st.session_state.credentials = None
-    st.session_state.sheet_id = None
+    st.session_state.sheet = None
 
-# Google OAuth settings - we'll use your credentials here
+# Google OAuth settings
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets', 
-          'https://www.googleapis.com/auth/drive.file']
+          'https://www.googleapis.com/auth/drive.file',
+          'https://www.googleapis.com/auth/userinfo.email']
 
-def authenticate_user():
+def init_oauth_flow():
     """
-    Handle Google sign-in process
-    This is like showing your ID to enter a building
+    Initialize the OAuth flow with proper configuration
+    This is like setting up the proper entrance to the building
     """
-    # Check if we have the necessary secrets
-    if 'google' not in st.secrets:
-        st.error("⚠️ Configurație lipsă! Adaugă credențialele Google în secrets.toml")
-        st.stop()
+    client_config = {
+        "web": {
+            "client_id": st.secrets.google.client_id,
+            "client_secret": st.secrets.google.client_secret,
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "redirect_uris": [st.secrets.google.redirect_uri]
+        }
+    }
     
-    # Create the OAuth flow - this is Google's official login process
     flow = Flow.from_client_config(
-        {
-            "web": {
-                "client_id": st.secrets.google.client_id,
-                "client_secret": st.secrets.google.client_secret,
-                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                "token_uri": "https://oauth2.googleapis.com/token",
-                "redirect_uris": [st.secrets.google.redirect_uri]
-            }
-        },
-        scopes=SCOPES
+        client_config,
+        scopes=SCOPES,
+        redirect_uri=st.secrets.google.redirect_uri
     )
     
-    flow.redirect_uri = st.secrets.google.redirect_uri
+    return flow
+
+def check_authentication():
+    """
+    Check if user is coming back from Google login
+    Like checking if someone has a valid entrance ticket
+    """
+    # Look for the authorization code in the URL
+    query_params = st.query_params
     
-    # Generate authorization URL
-    auth_url, _ = flow.authorization_url(prompt='consent')
+    if "code" in query_params:
+        # User is coming back from Google with authorization
+        try:
+            flow = init_oauth_flow()
+            
+            # Exchange the authorization code for credentials
+            flow.fetch_token(code=query_params["code"])
+            
+            # Get the credentials
+            credentials = flow.credentials
+            
+            # Save to session state
+            st.session_state.authenticated = True
+            st.session_state.credentials = credentials
+            
+            # Get user email
+            from google.auth.transport.requests import Request
+            from google.oauth2 import id_token
+            import requests
+            
+            # Get user info
+            user_info_service = requests.get(
+                'https://www.googleapis.com/oauth2/v1/userinfo',
+                headers={'Authorization': f'Bearer {credentials.token}'}
+            ).json()
+            
+            st.session_state.user_email = user_info_service.get('email', 'Utilizator')
+            
+            # Clear the code from URL to clean things up
+            st.query_params.clear()
+            
+            # Initialize Google Sheets connection
+            init_google_sheets()
+            
+            return True
+            
+        except Exception as e:
+            st.error(f"Eroare la autentificare: {str(e)}")
+            st.stop()
     
-    return auth_url
+    return False
+
+def init_google_sheets():
+    """
+    Initialize connection to Google Sheets
+    Like opening your personal notebook
+    """
+    try:
+        # Create credentials object for gspread
+        import google.auth
+        from google.oauth2.credentials import Credentials
+        
+        creds = st.session_state.credentials
+        
+        # Initialize gspread client
+        import gspread
+        client = gspread.authorize(creds)
+        
+        # Try to open existing spreadsheet or create new one
+        try:
+            spreadsheet = client.open("Monitor Glicemie - Date Personale")
+        except gspread.SpreadsheetNotFound:
+            # Create new spreadsheet
+            spreadsheet = client.create("Monitor Glicemie - Date Personale")
+            
+            # Set up the initial worksheet
+            worksheet = spreadsheet.sheet1
+            worksheet.update('A1:G1', [['Data', 'Ora', 'Valoare', 'Tip Măsurare', 'Feedback', 'Ton', 'Note']])
+            
+            # Format headers
+            worksheet.format('A1:G1', {
+                "backgroundColor": {"red": 0.2, "green": 0.5, "blue": 0.9},
+                "textFormat": {"foregroundColor": {"red": 1, "green": 1, "blue": 1}, "bold": True}
+            })
+        
+        st.session_state.sheet = spreadsheet
+        
+    except Exception as e:
+        st.error(f"Eroare la conectarea cu Google Sheets: {str(e)}")
 
 def get_feedback(value, measurement_type):
     """
@@ -106,20 +185,6 @@ def get_feedback(value, measurement_type):
         else:
             return ("⚠️ Valoare crescută. Monitorizează mai atent.", "warning")
 
-def create_or_get_spreadsheet():
-    """
-    Create or access the user's glucose data spreadsheet
-    Like creating a new notebook or opening an existing one
-    """
-    try:
-        # This would use the authenticated credentials to access Google Sheets
-        # For now, we'll simulate this
-        st.session_state.sheet_id = "your-sheet-id"
-        return True
-    except Exception as e:
-        st.error(f"Eroare la accesarea foii de calcul: {str(e)}")
-        return False
-
 def save_glucose_reading(value, measurement_type, notes=""):
     """
     Save a glucose reading to Google Sheets
@@ -129,29 +194,45 @@ def save_glucose_reading(value, measurement_type, notes=""):
     feedback, tone = get_feedback(value, measurement_type)
     
     # Create the data record
-    record = {
-        "Data": timestamp.strftime("%Y-%m-%d"),
-        "Ora": timestamp.strftime("%H:%M"),
-        "Valoare": value,
-        "Tip Măsurare": measurement_type,
-        "Feedback": feedback,
-        "Ton": tone,
-        "Note": notes
-    }
+    record = [
+        timestamp.strftime("%Y-%m-%d"),
+        timestamp.strftime("%H:%M"),
+        value,
+        measurement_type,
+        feedback,
+        tone,
+        notes
+    ]
     
-    # Here we would save to Google Sheets
-    # For now, we'll store in session state
-    if 'readings' not in st.session_state:
-        st.session_state.readings = []
-    
-    st.session_state.readings.append(record)
-    return feedback, tone
+    # Save to Google Sheets
+    try:
+        worksheet = st.session_state.sheet.sheet1
+        worksheet.append_row(record)
+        return feedback, tone
+    except Exception as e:
+        st.error(f"Eroare la salvarea datelor: {str(e)}")
+        return feedback, tone
+
+def get_all_readings():
+    """
+    Get all readings from Google Sheets
+    Like reading all entries from your diary
+    """
+    try:
+        worksheet = st.session_state.sheet.sheet1
+        data = worksheet.get_all_records()
+        return pd.DataFrame(data)
+    except:
+        return pd.DataFrame()
 
 def main():
     """
     Main application logic
     This is where everything comes together
     """
+    
+    # Check if user is returning from authentication
+    check_authentication()
     
     # Title and description
     st.title("🩸 Monitor Glicemie")
@@ -175,13 +256,43 @@ def main():
         avea un carnețel personal în seiful tău Google.
         """)
         
-        # Login button
+        # Create the login button with better handling
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
-            if st.button("🔐 Conectează-te cu Google", type="primary", use_container_width=True):
-                auth_url = authenticate_user()
-                st.markdown(f'<a href="{auth_url}" target="_self">Click aici pentru autentificare</a>', 
-                          unsafe_allow_html=True)
+            st.markdown("### Pentru a începe:")
+            
+            # Initialize OAuth flow
+            flow = init_oauth_flow()
+            
+            # Generate authorization URL
+            auth_url, _ = flow.authorization_url(
+                access_type='offline',
+                include_granted_scopes='true',
+                prompt='consent'
+            )
+            
+            # Create a nice button that opens in new tab
+            st.markdown(
+                f"""
+                <div style="text-align: center; padding: 20px;">
+                    <a href="{auth_url}" target="_blank" style="
+                        display: inline-block;
+                        padding: 12px 24px;
+                        background-color: #4285f4;
+                        color: white;
+                        text-decoration: none;
+                        border-radius: 4px;
+                        font-weight: bold;
+                        font-size: 16px;
+                    ">
+                        🔐 Conectează-te cu Google
+                    </a>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+            
+            st.info("💡 **Sfat:** După ce te autentifici cu Google, vei fi redirecționat înapoi aici automat.")
         
         return
     
@@ -197,6 +308,9 @@ def main():
         
         if st.button("🚪 Deconectare"):
             st.session_state.authenticated = False
+            st.session_state.credentials = None
+            st.session_state.sheet = None
+            st.query_params.clear()
             st.rerun()
     
     # Main content based on selected page
@@ -268,13 +382,7 @@ def show_add_reading_page():
             
             # Add encouraging message
             st.markdown("---")
-            st.markdown("✅ **Citire salvată cu succes!**")
-            
-            # Show quick stats if we have data
-            if 'readings' in st.session_state and len(st.session_state.readings) > 0:
-                recent_readings = st.session_state.readings[-5:]
-                avg_value = sum(r['Valoare'] for r in recent_readings) / len(recent_readings)
-                st.metric("Media ultimelor 5 citiri", f"{avg_value:.0f} mg/dL")
+            st.markdown("✅ **Citire salvată cu succes în Google Sheets!**")
 
 def show_history_page():
     """
@@ -283,12 +391,15 @@ def show_history_page():
     """
     st.header("📊 Istoric Citiri")
     
-    if 'readings' not in st.session_state or len(st.session_state.readings) == 0:
+    # Get data from Google Sheets
+    df = get_all_readings()
+    
+    if df.empty:
         st.info("Nu ai încă citiri salvate. Adaugă prima ta citire!")
         return
     
-    # Convert to DataFrame for easy display
-    df = pd.DataFrame(st.session_state.readings)
+    # Convert Valoare column to numeric
+    df['Valoare'] = pd.to_numeric(df['Valoare'], errors='coerce')
     
     # Display summary statistics
     col1, col2, col3 = st.columns(3)
@@ -298,15 +409,21 @@ def show_history_page():
         st.metric("Media Generală", f"{df['Valoare'].mean():.0f} mg/dL")
     with col3:
         good_readings = len(df[df['Ton'] == 'good'])
-        percentage = (good_readings / len(df)) * 100
+        percentage = (good_readings / len(df)) * 100 if len(df) > 0 else 0
         st.metric("În Limite Normale", f"{percentage:.0f}%")
     
     # Show the readings table
     st.markdown("### Citiri Recente")
     
-    # Format the display
+    # Sort by date and time (most recent first)
+    try:
+        df['DateTime'] = pd.to_datetime(df['Data'] + ' ' + df['Ora'])
+        df = df.sort_values('DateTime', ascending=False)
+    except:
+        pass
+    
+    # Display the data
     display_df = df[['Data', 'Ora', 'Valoare', 'Tip Măsurare', 'Feedback', 'Note']].copy()
-    display_df = display_df.sort_index(ascending=False)  # Most recent first
     
     st.dataframe(
         display_df,
@@ -331,18 +448,23 @@ def show_trends_page():
     """
     st.header("📈 Tendințe")
     
-    if 'readings' not in st.session_state or len(st.session_state.readings) == 0:
+    # Get data from Google Sheets
+    df = get_all_readings()
+    
+    if df.empty or len(df) < 2:
         st.info("Ai nevoie de cel puțin câteva citiri pentru a vedea tendințe.")
         return
     
-    df = pd.DataFrame(st.session_state.readings)
+    # Prepare data
+    df['Valoare'] = pd.to_numeric(df['Valoare'], errors='coerce')
+    df['DateTime'] = pd.to_datetime(df['Data'] + ' ' + df['Ora'])
     
     # Create a simple line chart
     fig = go.Figure()
     
     # Add glucose values line
     fig.add_trace(go.Scatter(
-        x=pd.to_datetime(df['Data'] + ' ' + df['Ora']),
+        x=df['DateTime'],
         y=df['Valoare'],
         mode='lines+markers',
         name='Glicemie',
@@ -399,8 +521,8 @@ def show_settings_page():
     
     st.markdown("### Export Date")
     if st.button("📥 Descarcă datele în format CSV"):
-        if 'readings' in st.session_state and len(st.session_state.readings) > 0:
-            df = pd.DataFrame(st.session_state.readings)
+        df = get_all_readings()
+        if not df.empty:
             csv = df.to_csv(index=False)
             st.download_button(
                 label="💾 Salvează CSV",
@@ -409,23 +531,15 @@ def show_settings_page():
                 mime="text/csv"
             )
     
+    st.markdown("### Foaia ta Google Sheets")
+    if st.session_state.sheet:
+        sheet_url = st.session_state.sheet.url
+        st.markdown(f"📊 [Deschide foaia de calcul direct]({sheet_url})")
+        st.info("Poți edita direct în Google Sheets dacă dorești. Aplicația va citi automat modificările.")
+    
     st.markdown("### Ținte Personalizate")
     st.info("În dezvoltare: Posibilitatea de a seta ținte personalizate conform recomandărilor medicului tău.")
-    
-    st.markdown("### Ștergere Date")
-    with st.expander("⚠️ Zonă Periculoasă"):
-        st.warning("Ștergerea datelor este permanentă și nu poate fi anulată!")
-        if st.button("🗑️ Șterge toate datele", type="secondary"):
-            if 'readings' in st.session_state:
-                st.session_state.readings = []
-                st.success("Toate datele au fost șterse.")
-                st.rerun()
 
 # Run the app
 if __name__ == "__main__":
-    # For testing purposes, simulate authentication
-    if st.query_params.get("authenticated") == "true":
-        st.session_state.authenticated = True
-        st.session_state.user_email = "test@example.com"
-    
     main()
