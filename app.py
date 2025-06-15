@@ -31,7 +31,8 @@ if 'authenticated' not in st.session_state:
     st.session_state.sheet = None
 
 # Google OAuth settings
-SCOPES = ['https://www.googleapis.com/auth/spreadsheets', 
+SCOPES = ["openid",  # ← linie nouă
+          'https://www.googleapis.com/auth/spreadsheets', 
           'https://www.googleapis.com/auth/drive.file',
           'https://www.googleapis.com/auth/userinfo.email']
 
