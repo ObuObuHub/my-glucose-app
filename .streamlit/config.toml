@@ -1,0 +1,22 @@
+# This file controls how your app looks and behaves
+# Like adjusting settings on your TV
+
+[theme]
+# Colors that are easy on the eyes and look professional
+primaryColor = "#2196F3"           # Blue for buttons
+backgroundColor = "#FFFFFF"        # White background
+secondaryBackgroundColor = "#F0F2F6"  # Light gray for sidebars
+textColor = "#262730"             # Dark text for readability
+
+# Font that looks good on all devices
+font = "sans serif"
+
+[browser]
+# This makes your app tab have a nice title
+gatherUsageStats = false          # We don't collect any usage data
+
+[server]
+# Basic server settings
+headless = true                   # Runs without opening a browser window
+enableCORS = false               # Security setting
+port = 8501                      # Standard Streamlit port
