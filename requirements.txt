@@ -1,6 +1,3 @@
-# This file tells Streamlit what tools your app needs
-# Think of it like a shopping list for ingredients
-
 streamlit==1.28.0
 pandas==2.1.0
 plotly==5.17.0
