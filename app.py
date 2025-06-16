@@ -155,7 +155,7 @@ def get_feedback(value, measurement_type):
     
     # Check for dangerous low blood sugar first
     if value < 70:
-        return ("⚠️ Hipoglicemie! Consumă imediat 15g carbohidrați rapizi. "
+        return ("🔴 Hipoglicemie! Consumă imediat 15g carbohidrați rapizi. "
                 "Verifică din nou în 15 minute.", "urgent")
     
     # Check for dangerous high blood sugar
